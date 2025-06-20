@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
 
 // JWT Secret Key (hardcoded as per instructions)
 const JWT_SECRET = 'prof-it-art-school-secret-key-2023';
@@ -35,4 +36,9 @@ exports.hashPassword = async (password) => {
 // Compare Password
 exports.comparePassword = async (password, hashedPassword) => {
   return await bcrypt.compare(password, hashedPassword);
+};
+
+// Generate Reset Password Token
+exports.generateResetToken = () => {
+  return crypto.randomBytes(20).toString('hex');
 };

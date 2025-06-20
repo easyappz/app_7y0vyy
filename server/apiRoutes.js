@@ -9,7 +9,8 @@ const Schedule = require('./models/Schedule');
 const Attendance = require('./models/Attendance');
 const Payment = require('./models/Payment');
 const Notification = require('./models/Notification');
-const { generateToken, hashPassword, comparePassword } = require('./utils/auth');
+const { generateToken, hashPassword, comparePassword, generateResetToken } = require('./utils/auth');
+const { sendEmail } = require('./utils/email');
 
 // Test Route
 router.get('/hello', (req, res) => {
@@ -27,6 +28,71 @@ router.get('/status', (req, res) => {
 
 // Auth Routes
 router.post('/auth/register', async (req, res) => {
+  try {
+    const { email, password, firstName, lastName, role, phone, address, adminKey } = req.body;
+
+    if (!email || !password || !firstName || !lastName || !role) {
+      return res.status(400).json({ message: 'All required fields must be provided' });
+    }
+
+    if (role === 'admin' && adminKey !== 'ilezhaniev') {
+      return res.status(403).json({ message: 'Invalid admin key for registration' });
+    }
+
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      return res.status(400).json({ message: 'Email already registered' });
+    }
+
+    const hashedPassword = await hashPassword(password);
+    const isApproved = role === 'admin' ? true : false;
+
+    const user = new User({
+      email,
+      password: hashedPassword,
+      firstName,
+      lastName,
+      role,
+      phone,
+      address,
+      isApproved
+    });
+
+    await user.save();
+    const token = generateToken(user);
+
+    if (!isApproved) {
+      const admins = await User.find({ role: 'admin', isApproved: true });
+      admins.forEach(async (admin) => {
+        const notification = new Notification({
+          user: admin._id,
+          title: 'New User Registration',
+          message: `A new ${role} (${firstName} ${lastName}) is waiting for approval.`,
+          type: 'general'
+        });
+        await notification.save();
+      });
+    }
+
+    res.status(201).json({
+      message: isApproved ? 'User registered successfully' : 'User registered, awaiting admin approval',
+      token,
+      user: {
+        id: user._id,
+        email: user.email,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        role: user.role,
+        isApproved: user.isApproved
+      }
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Error during registration' });
+  }
+});
+
+router.post('/auth/register-by-admin', protect, restrictTo('admin'), async (req, res) => {
   try {
     const { email, password, firstName, lastName, role, phone, address } = req.body;
 
@@ -47,26 +113,28 @@ router.post('/auth/register', async (req, res) => {
       lastName,
       role,
       phone,
-      address
+      address,
+      isApproved: true
     });
 
     await user.save();
     const token = generateToken(user);
 
     res.status(201).json({
-      message: 'User registered successfully',
+      message: 'User registered successfully by admin',
       token,
       user: {
         id: user._id,
         email: user.email,
         firstName: user.firstName,
         lastName: user.lastName,
-        role: user.role
+        role: user.role,
+        isApproved: user.isApproved
       }
     });
   } catch (error) {
     console.error(error);
-    res.status(500).json({ message: 'Error during registration' });
+    res.status(500).json({ message: 'Error during admin registration' });
   }
 });
 
@@ -88,6 +156,10 @@ router.post('/auth/login', async (req, res) => {
       return res.status(400).json({ message: 'Invalid credentials' });
     }
 
+    if (!user.isApproved) {
+      return res.status(403).json({ message: 'Account is not approved yet' });
+    }
+
     const token = generateToken(user);
     res.json({
       message: 'Login successful',
@@ -97,12 +169,136 @@ router.post('/auth/login', async (req, res) => {
         email: user.email,
         firstName: user.firstName,
         lastName: user.lastName,
-        role: user.role
+        role: user.role,
+        isApproved: user.isApproved
       }
     });
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: 'Error during login' });
+  }
+});
+
+router.post('/auth/forgot-password', async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({ message: 'Email is required' });
+    }
+
+    const user = await User.findOne({ email });
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    const resetToken = generateResetToken();
+    const resetExpires = new Date(Date.now() + 3600000); // 1 hour from now
+
+    user.resetPasswordToken = resetToken;
+    user.resetPasswordExpires = resetExpires;
+    await user.save();
+
+    const resetUrl = `http://your-frontend-domain.com/reset-password?token=${resetToken}`;
+    const emailText = `You are receiving this because you (or someone else) have requested the reset of the password for your account.
+
+` +
+      `Please click on the following link, or paste this into your browser to complete the process within one hour of receiving it:
+
+` +
+      `${resetUrl}
+
+` +
+      `If you did not request this, please ignore this email and your password will remain unchanged.`;
+
+    const emailSent = await sendEmail(user.email, 'Password Reset - Prof-it Art School', emailText);
+    if (!emailSent) {
+      return res.status(500).json({ message: 'Error sending reset email' });
+    }
+
+    res.json({ message: 'Password reset email sent. Check your inbox for instructions.' });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Error processing password reset request' });
+  }
+});
+
+router.post('/auth/reset-password', async (req, res) => {
+  try {
+    const { token, newPassword } = req.body;
+
+    if (!token || !newPassword) {
+      return res.status(400).json({ message: 'Token and new password are required' });
+    }
+
+    const user = await User.findOne({
+      resetPasswordToken: token,
+      resetPasswordExpires: { $gt: Date.now() }
+    });
+
+    if (!user) {
+      return res.status(400).json({ message: 'Invalid or expired reset token' });
+    }
+
+    const hashedPassword = await hashPassword(newPassword);
+    user.password = hashedPassword;
+    user.resetPasswordToken = null;
+    user.resetPasswordExpires = null;
+    await user.save();
+
+    res.json({ message: 'Password reset successfully' });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Error resetting password' });
+  }
+});
+
+router.post('/auth/approve-user/:userId', protect, restrictTo('admin'), async (req, res) => {
+  try {
+    const user = await User.findById(req.params.userId);
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    if (user.isApproved) {
+      return res.status(400).json({ message: 'User is already approved' });
+    }
+
+    user.isApproved = true;
+    await user.save();
+
+    const notification = new Notification({
+      user: user._id,
+      title: 'Account Approved',
+      message: 'Your account has been approved. You can now log in.',
+      type: 'general'
+    });
+    await notification.save();
+
+    res.json({
+      message: 'User approved successfully',
+      user: {
+        id: user._id,
+        email: user.email,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        role: user.role,
+        isApproved: user.isApproved
+      }
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Error approving user' });
+  }
+});
+
+router.get('/auth/pending-users', protect, restrictTo('admin'), async (req, res) => {
+  try {
+    const pendingUsers = await User.find({ isApproved: false }).select('-password');
+    res.json({ pendingUsers });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Error fetching pending users' });
   }
 });
 
