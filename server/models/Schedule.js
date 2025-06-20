@@ -24,6 +24,14 @@ const scheduleSchema = new mongoose.Schema({
     enum: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'],
     required: true
   },
+  isRecurring: {
+    type: Boolean,
+    default: false
+  },
+  recurrenceEndDate: {
+    type: Date,
+    default: null
+  },
   createdAt: {
     type: Date,
     default: Date.now

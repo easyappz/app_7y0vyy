@@ -15,6 +15,14 @@ const classroomSchema = new mongoose.Schema({
     type: String,
     trim: true
   },
+  location: {
+    type: String,
+    trim: true
+  },
+  equipment: {
+    type: [String],
+    default: []
+  },
   createdAt: {
     type: Date,
     default: Date.now

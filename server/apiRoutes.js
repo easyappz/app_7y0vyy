@@ -329,12 +329,18 @@ router.get('/users/:id', protect, restrictTo('admin'), async (req, res) => {
 // Classroom Routes
 router.post('/classrooms', protect, restrictTo('admin'), async (req, res) => {
   try {
-    const { name, capacity, description } = req.body;
+    const { name, capacity, description, location, equipment } = req.body;
     if (!name || !capacity) {
       return res.status(400).json({ message: 'Name and capacity are required' });
     }
 
-    const classroom = new Classroom({ name, capacity, description });
+    const classroom = new Classroom({ 
+      name, 
+      capacity, 
+      description, 
+      location, 
+      equipment: equipment || [] 
+    });
     await classroom.save();
     res.status(201).json({ classroom });
   } catch (error) {
@@ -350,6 +356,231 @@ router.get('/classrooms', protect, async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: 'Error fetching classrooms' });
+  }
+});
+
+router.get('/classrooms/:id', protect, async (req, res) => {
+  try {
+    const classroom = await Classroom.findById(req.params.id);
+    if (!classroom) {
+      return res.status(404).json({ message: 'Classroom not found' });
+    }
+    res.json({ classroom });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Error fetching classroom' });
+  }
+});
+
+router.put('/classrooms/:id', protect, restrictTo('admin'), async (req, res) => {
+  try {
+    const { name, capacity, description, location, equipment } = req.body;
+    const classroom = await Classroom.findById(req.params.id);
+
+    if (!classroom) {
+      return res.status(404).json({ message: 'Classroom not found' });
+    }
+
+    if (name) classroom.name = name;
+    if (capacity) classroom.capacity = capacity;
+    if (description) classroom.description = description;
+    if (location) classroom.location = location;
+    if (equipment && Array.isArray(equipment)) classroom.equipment = equipment;
+
+    await classroom.save();
+    res.json({ classroom });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Error updating classroom' });
+  }
+});
+
+router.delete('/classrooms/:id', protect, restrictTo('admin'), async (req, res) => {
+  try {
+    const classroom = await Classroom.findById(req.params.id);
+    if (!classroom) {
+      return res.status(404).json({ message: 'Classroom not found' });
+    }
+
+    // Check if classroom is used in schedules
+    const schedules = await Schedule.find({ classroom: req.params.id });
+    if (schedules.length > 0) {
+      return res.status(400).json({ message: 'Cannot delete classroom with associated schedules' });
+    }
+
+    await Classroom.deleteOne({ _id: req.params.id });
+    res.json({ message: 'Classroom deleted successfully' });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Error deleting classroom' });
+  }
+});
+
+router.get('/classrooms/:id/schedule', protect, async (req, res) => {
+  try {
+    const { view, date } = req.query;
+    const classroomId = req.params.id;
+
+    const classroom = await Classroom.findById(classroomId);
+    if (!classroom) {
+      return res.status(404).json({ message: 'Classroom not found' });
+    }
+
+    let startDate, endDate;
+    const currentDate = date ? new Date(date) : new Date();
+
+    if (view === 'day') {
+      startDate = new Date(currentDate);
+      startDate.setHours(0, 0, 0, 0);
+      endDate = new Date(currentDate);
+      endDate.setHours(23, 59, 59, 999);
+    } else if (view === 'week') {
+      // Start of week (assuming week starts on Monday)
+      startDate = new Date(currentDate);
+      startDate.setDate(currentDate.getDate() - currentDate.getDay() + (currentDate.getDay() === 0 ? -6 : 1));
+      startDate.setHours(0, 0, 0, 0);
+      // End of week
+      endDate = new Date(startDate);
+      endDate.setDate(startDate.getDate() + 6);
+      endDate.setHours(23, 59, 59, 999);
+    } else if (view === 'month') {
+      // Start of month
+      startDate = new Date(currentDate.getFullYear(), currentDate.getMonth(), 1);
+      startDate.setHours(0, 0, 0, 0);
+      // End of month
+      endDate = new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 0);
+      endDate.setHours(23, 59, 59, 999);
+    } else {
+      return res.status(400).json({ message: 'Invalid view parameter. Use day, week, or month.' });
+    }
+
+    const schedules = await Schedule.find({
+      classroom: classroomId,
+      startTime: { $gte: startDate, $lte: endDate }
+    }).populate({
+      path: 'group',
+      populate: {
+        path: 'teacher'
+      }
+    });
+
+    // Format the response to include status (occupied/free) and lesson details
+    const formattedSchedules = schedules.map(schedule => {
+      return {
+        id: schedule._id,
+        startTime: schedule.startTime,
+        endTime: schedule.endTime,
+        dayOfWeek: schedule.dayOfWeek,
+        isRecurring: schedule.isRecurring,
+        recurrenceEndDate: schedule.recurrenceEndDate,
+        status: 'occupied',
+        lesson: {
+          groupName: schedule.group.name,
+          subject: schedule.group.subject,
+          teacher: schedule.group.teacher ? `${schedule.group.teacher.firstName} ${schedule.group.teacher.lastName}` : 'N/A'
+        }
+      };
+    });
+
+    res.json({ 
+      classroom: {
+        id: classroom._id,
+        name: classroom.name
+      },
+      schedules: formattedSchedules,
+      view,
+      startDate,
+      endDate
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Error fetching classroom schedule' });
+  }
+});
+
+router.get('/classrooms/schedule/all', protect, async (req, res) => {
+  try {
+    const { view, date } = req.query;
+
+    let startDate, endDate;
+    const currentDate = date ? new Date(date) : new Date();
+
+    if (view === 'day') {
+      startDate = new Date(currentDate);
+      startDate.setHours(0, 0, 0, 0);
+      endDate = new Date(currentDate);
+      endDate.setHours(23, 59, 59, 999);
+    } else if (view === 'week') {
+      // Start of week (assuming week starts on Monday)
+      startDate = new Date(currentDate);
+      startDate.setDate(currentDate.getDate() - currentDate.getDay() + (currentDate.getDay() === 0 ? -6 : 1));
+      startDate.setHours(0, 0, 0, 0);
+      // End of week
+      endDate = new Date(startDate);
+      endDate.setDate(startDate.getDate() + 6);
+      endDate.setHours(23, 59, 59, 999);
+    } else if (view === 'month') {
+      // Start of month
+      startDate = new Date(currentDate.getFullYear(), currentDate.getMonth(), 1);
+      startDate.setHours(0, 0, 0, 0);
+      // End of month
+      endDate = new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 0);
+      endDate.setHours(23, 59, 59, 999);
+    } else {
+      return res.status(400).json({ message: 'Invalid view parameter. Use day, week, or month.' });
+    }
+
+    const classrooms = await Classroom.find();
+    const schedules = await Schedule.find({
+      startTime: { $gte: startDate, $lte: endDate }
+    }).populate({
+      path: 'group classroom',
+      populate: {
+        path: 'teacher'
+      }
+    });
+
+    // Group schedules by classroom
+    const classroomSchedules = classrooms.map(classroom => {
+      const classroomSchedules = schedules.filter(schedule => 
+        schedule.classroom && schedule.classroom._id.toString() === classroom._id.toString()
+      );
+
+      const formattedSchedules = classroomSchedules.map(schedule => {
+        return {
+          id: schedule._id,
+          startTime: schedule.startTime,
+          endTime: schedule.endTime,
+          dayOfWeek: schedule.dayOfWeek,
+          isRecurring: schedule.isRecurring,
+          recurrenceEndDate: schedule.recurrenceEndDate,
+          status: 'occupied',
+          lesson: {
+            groupName: schedule.group.name,
+            subject: schedule.group.subject,
+            teacher: schedule.group.teacher ? `${schedule.group.teacher.firstName} ${schedule.group.teacher.lastName}` : 'N/A'
+          }
+        };
+      });
+
+      return {
+        classroom: {
+          id: classroom._id,
+          name: classroom.name
+        },
+        schedules: formattedSchedules
+      };
+    });
+
+    res.json({ 
+      classroomSchedules,
+      view,
+      startDate,
+      endDate
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Error fetching all classrooms schedules' });
   }
 });
 
@@ -383,12 +614,20 @@ router.get('/groups', protect, async (req, res) => {
 // Schedule Routes
 router.post('/schedules', protect, restrictTo('admin'), async (req, res) => {
   try {
-    const { group, classroom, startTime, endTime, dayOfWeek } = req.body;
+    const { group, classroom, startTime, endTime, dayOfWeek, isRecurring, recurrenceEndDate } = req.body;
     if (!group || !classroom || !startTime || !endTime || !dayOfWeek) {
       return res.status(400).json({ message: 'All schedule details are required' });
     }
 
-    const schedule = new Schedule({ group, classroom, startTime, endTime, dayOfWeek });
+    const schedule = new Schedule({ 
+      group, 
+      classroom, 
+      startTime, 
+      endTime, 
+      dayOfWeek,
+      isRecurring: isRecurring || false,
+      recurrenceEndDate: isRecurring ? recurrenceEndDate : null
+    });
     await schedule.save();
     res.status(201).json({ schedule });
   } catch (error) {
